@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -292,4 +293,62 @@ func TestSeekData(t *testing.T) {
 		t.Errorf("off=%d, expected=%d\n", off, dataOffset)
 	}
 	f.Close()
+}
+
+// gocryptfs.longname.*.name of hardlinked files should not appear hardlinked (as the
+// contents are different).
+//
+// This means that
+// 1) They have a different NodeID, hence the kernel knows it's different files
+// 2) They have a different inode number, hence userspace knows they are not hard-linked.
+//
+// https://github.com/rfjakob/gocryptfs/issues/802
+func TestHardlinkedLongname(t *testing.T) {
+	if plaintextnames {
+		t.Skip()
+	}
+
+	workdir := dirA + "/" + t.Name()
+	if err := os.Mkdir(workdir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	long1 := workdir + "/" + strings.Repeat("x", 200)
+	if err := ioutil.WriteFile(long1, []byte("hello"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	long2 := workdir + "/" + strings.Repeat("y", 220)
+	if err := syscall.Link(long1, long2); err != nil {
+		t.Fatal(err)
+	}
+
+	// Find workdir in encrypted view
+	var st syscall.Stat_t
+	if err := syscall.Stat(workdir, &st); err != nil {
+		t.Fatal(err)
+	}
+	cWorkdir := dirB + "/" + findIno(dirB, st.Ino)
+	t.Logf("workdir=%q cWorkdir=%q", workdir, cWorkdir)
+
+	matches, err := filepath.Glob(cWorkdir + "/gocryptfs.longname.*.name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 2 {
+		t.Fatalf("BUG: only %d matches, want 2", len(matches))
+	}
+	if test_helpers.Md5fn(matches[0]) == test_helpers.Md5fn(matches[1]) {
+		t.Errorf("Files %q are identical - that's wrong!", matches)
+	}
+
+	var st0 syscall.Stat_t
+	if err := syscall.Stat(matches[0], &st0); err != nil {
+		t.Fatal(err)
+	}
+	var st1 syscall.Stat_t
+	if err := syscall.Stat(matches[1], &st1); err != nil {
+		t.Fatal(err)
+	}
+	if st0.Ino == st1.Ino {
+		t.Errorf("Files %q have the same inode number - that's wrong!", matches)
+	}
 }

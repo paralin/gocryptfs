@@ -3,8 +3,8 @@
 //
 // Format of the returned inode numbers:
 //
-//	[spill bit = 0][15 bit namespace id][48 bit passthru inode number]
-//	[spill bit = 1][63 bit spill inode number                        ]
+//	[spill bit = 0][15 bit namespace id][48 bit passthru inode number] = 64 bit translated inode number
+//	[spill bit = 1][63 bit counter                                   ] = 64 bit spill inode number
 //
 // Each (Dev, Tag) tuple gets a namespace id assigned. The original inode
 // number is then passed through in the lower 48 bits.
@@ -16,7 +16,9 @@ package inomap
 
 import (
 	"log"
+	"math"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
 	"github.com/rfjakob/gocryptfs/v2/internal/tlog"
@@ -27,10 +29,8 @@ const (
 	maxNamespaceId = 1<<15 - 1
 	// max value of 48 bit passthru inode number
 	maxPassthruIno = 1<<48 - 1
-	// max value of 63 bit spill inode number
-	maxSpillIno = 1<<63 - 1
-	// bit 63 is used as the spill bit
-	spillBit = 1 << 63
+	// the spill inode number space starts at 0b10000...0.
+	spillSpaceStart = 1 << 63
 )
 
 // InoMap stores the maps using for inode number translation.
@@ -57,7 +57,7 @@ func New(rootDev uint64) *InoMap {
 		namespaceMap:  make(map[namespaceData]uint16),
 		namespaceNext: 0,
 		spillMap:      make(map[QIno]uint64),
-		spillNext:     0,
+		spillNext:     spillSpaceStart,
 	}
 	if rootDev > 0 {
 		// Reserve namespace 0 for rootDev
@@ -69,23 +69,32 @@ func New(rootDev uint64) *InoMap {
 
 var spillWarn sync.Once
 
+// NextSpillIno returns a fresh inode number from the spill pool without adding it to
+// spillMap.
+// Reverse mode NextSpillIno() for gocryptfs.longname.*.name files where a stable
+// mapping is not needed.
+func (m *InoMap) NextSpillIno() (out uint64) {
+	if m.spillNext == math.MaxUint64 {
+		log.Panicf("spillMap overflow: spillNext = 0x%x", m.spillNext)
+	}
+	return atomic.AddUint64(&m.spillNext, 1) - 1
+}
+
 func (m *InoMap) spill(in QIno) (out uint64) {
-	spillWarn.Do(func() { tlog.Warn.Printf("InoMap: opening spillMap for %v", in) })
+	spillWarn.Do(func() { tlog.Warn.Printf("InoMap: opening spillMap for %#v", in) })
 
 	out, found := m.spillMap[in]
 	if found {
-		return out | spillBit
+		return out
 	}
-	if m.spillNext >= maxSpillIno {
-		log.Panicf("spillMap overflow: spillNext = 0x%x", m.spillNext)
-	}
-	out = m.spillNext
-	m.spillNext++
+
+	out = m.NextSpillIno()
 	m.spillMap[in] = out
-	return out | spillBit
+
+	return out
 }
 
-// Translate maps the passed-in (device, inode) pair to a unique inode number.
+// Translate maps the passed-in (device, tag, inode) tuple to a unique inode number.
 func (m *InoMap) Translate(in QIno) (out uint64) {
 	m.Lock()
 	defer m.Unlock()

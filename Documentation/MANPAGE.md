@@ -107,7 +107,7 @@ Run `gocryptfs -speed` to find out if and how much slower.
 
 #### -deterministic-names
 Disable file name randomisation and creation of `gocryptfs.diriv` files.
-This can prevent sync conflicts conflicts when synchronising files, but
+This can prevent sync conflicts when synchronising files, but
 leaks information about identical file names across directories
 ("Identical names leak" in https://nuetzlich.net/gocryptfs/comparison/#file-names ).
 
@@ -155,7 +155,10 @@ mounted using gocryptfs v1.2 and higher. Default true.
 
 #### -reverse
 Reverse mode shows a read-only encrypted view of a plaintext
-directory. Implies "-aessiv".
+directory. Implies `-aessiv`.
+
+If you want to mount the encrypted view using `-masterkey`, you *must*
+specify `-aessiv`.
 
 #### -xchacha
 Use XChaCha20-Poly1305 file content encryption. This should be much faster
@@ -378,7 +381,7 @@ Mount the filesystem read-write (`-rw`, default) or read-only (`-ro`).
 If both are specified, `-ro` takes precedence.
 
 #### -reverse
-See the `-reverse` section in INIT FLAGS. You need to specify the
+See the `-reverse` section in INIT OPTIONS. You need to specify the
 `-reverse` option both at `-init` and at mount.
 
 #### -serialize_reads
@@ -479,10 +482,31 @@ for details.
 
 #### -fido2 DEVICE_PATH
 Use a FIDO2 token to initialize and unlock the filesystem.
-Use "fido2-token -L" to obtain the FIDO2 token device path.
-For linux, "fido2-tools" package is needed.
+Use `fido2-token -L` to obtain the FIDO2 token device path.
+For linux, **fido2-tools** package is needed.
 
 Applies to: all actions that ask for a password.
+
+#### -fido2-assert-option OPTION
+Options passed to `fido2-assert` with `-t` option.
+This option may be specified multiple times, each time it will add two 
+arguements `-t` `OPTION` to `fido2-assert`.
+See `man fido2-assert` to check supported options.
+
+Examples:
+
+Creating a filesystem with no pin verification:
+
+    gocryptfs -init -fido2 DEVICE_PATH -fido2-assert-option pin=false CIPHERDIR
+
+Creating a filesystem with both user verification and pin verification:
+
+    gocryptfs -init -fido2 DEVICE_PATH -fido2-assert-option uv=true -fido2-assert-option pin=true CIPHERDIR
+
+Creating a filesystem with both user presence and user verification:
+
+    gocryptfs -init -fido2 DEVICE_PATH -fido2-assert-option up=true -fido2-assert-option uv=true CIPHERDIR
+
 
 #### -masterkey string
 Use an explicit master key specified on the command line or, if the special
@@ -501,10 +525,14 @@ settings have to be passed on the command line: `-aessiv` when you
 mount a filesystem that was created using reverse mode, or
 `-plaintextnames` for a filesystem that was created with that option.
 
-Examples:
+Example 1: Mount a filesystem that was created using default options:
 
-    -masterkey=6f717d8b-6b5f8e8a-fd0aa206-778ec093-62c5669b-abd229cd-241e00cd-b4d6713d
-    -masterkey=stdin
+    gocryptfs -masterkey=6f717d8b-6b5f8e8a-fd0aa206-778ec093-62c5669b-abd229cd-241e00cd-b4d6713d cipher mnt
+    gocryptfs -masterkey=stdin cipher mnt
+
+Example 2: Mount a `gocryptfs -reverse` filesystem (note that you *must* specify `-aessiv`):
+
+    gocryptfs -masterkey=stdin -aessiv cipher mnt
 
 Applies to: all actions that ask for a password.
 

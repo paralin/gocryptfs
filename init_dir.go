@@ -68,9 +68,9 @@ func initDir(args *argContainer) {
 			tlog.Fatal.Printf("Invalid cipherdir: %v", err)
 			os.Exit(exitcodes.CipherDir)
 		}
-		if !args.xchacha && !stupidgcm.CpuHasAES() {
+		if !args.xchacha && !stupidgcm.HasAESGCMHardwareSupport() {
 			tlog.Info.Printf(tlog.ColorYellow +
-				"Notice: Your CPU does not have AES acceleration. Consider using -xchacha for better performance." +
+				"Notice: Your CPU does not have AES-GCM acceleration. Consider using -xchacha for better performance." +
 				tlog.ColorReset)
 		}
 	}
@@ -84,7 +84,7 @@ func initDir(args *argContainer) {
 		if args.fido2 != "" {
 			fido2CredentialID = fido2.Register(args.fido2, filepath.Base(args.cipherdir))
 			fido2HmacSalt = cryptocore.RandBytes(32)
-			password = fido2.Secret(args.fido2, fido2CredentialID, fido2HmacSalt)
+			password = fido2.Secret(args.fido2, args.fido2_assert_options, fido2CredentialID, fido2HmacSalt)
 		} else {
 			// normal password entry
 			password, err = readpassword.Twice([]string(args.extpass), []string(args.passfile))
@@ -105,9 +105,11 @@ func initDir(args *argContainer) {
 			AESSIV:             args.aessiv,
 			Fido2CredentialID:  fido2CredentialID,
 			Fido2HmacSalt:      fido2HmacSalt,
+			Fido2AssertOptions: args.fido2_assert_options,
 			DeterministicNames: args.deterministic_names,
 			XChaCha20Poly1305:  args.xchacha,
 			LongNameMax:        args.longnamemax,
+			Masterkey:          handleArgsMasterkey(args),
 		})
 		if err != nil {
 			tlog.Fatal.Println(err)

@@ -5,11 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
-
-	"github.com/rfjakob/gocryptfs/v2/internal/exitcodes"
-
-	"github.com/rfjakob/gocryptfs/v2/internal/tlog"
 
 	"golang.org/x/sys/unix"
 
@@ -17,10 +14,12 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 
 	"github.com/rfjakob/gocryptfs/v2/internal/contentenc"
+	"github.com/rfjakob/gocryptfs/v2/internal/exitcodes"
 	"github.com/rfjakob/gocryptfs/v2/internal/fusefrontend"
 	"github.com/rfjakob/gocryptfs/v2/internal/inomap"
 	"github.com/rfjakob/gocryptfs/v2/internal/nametransform"
 	"github.com/rfjakob/gocryptfs/v2/internal/syscallcompat"
+	"github.com/rfjakob/gocryptfs/v2/internal/tlog"
 
 	"github.com/sabhiram/go-gitignore"
 )
@@ -45,6 +44,15 @@ type RootNode struct {
 	// If a file name length is shorter than shortNameMax, there is no need to
 	// hash it.
 	shortNameMax int
+	// gen is the node generation number. Normally, it is always set to 1,
+	// but reverse mode, like -sharestorage, uses an incrementing counter for new nodes.
+	// This makes each directory entry unique (even hard links),
+	// makes go-fuse hand out separate FUSE Node IDs for each, and prevents
+	// bizarre problems when inode numbers are reused behind our back,
+	// like this one: https://github.com/rfjakob/gocryptfs/issues/802
+	gen uint64
+	// rootIno is the inode number that we report for the root node on mount
+	rootIno uint64
 }
 
 // NewRootNode returns an encrypted FUSE overlay filesystem.
@@ -53,9 +61,10 @@ type RootNode struct {
 func NewRootNode(args fusefrontend.Args, c *contentenc.ContentEnc, n *nametransform.NameTransform) *RootNode {
 	var rootDev uint64
 	var st syscall.Stat_t
+	var statErr error
 	var shortNameMax int
-	if err := syscall.Stat(args.Cipherdir, &st); err != nil {
-		tlog.Warn.Printf("Could not stat backing directory %q: %v", args.Cipherdir, err)
+	if statErr = syscall.Stat(args.Cipherdir, &st); statErr != nil {
+		tlog.Warn.Printf("Could not stat backing directory %q: %v", args.Cipherdir, statErr)
 		if args.OneFileSystem {
 			tlog.Fatal.Printf("This is a fatal error in combination with -one-file-system")
 			os.Exit(exitcodes.CipherDir)
@@ -74,6 +83,10 @@ func NewRootNode(args fusefrontend.Args, c *contentenc.ContentEnc, n *nametransf
 		inoMap:        inomap.New(rootDev),
 		rootDev:       rootDev,
 		shortNameMax:  shortNameMax,
+	}
+	if statErr == nil {
+		rn.inoMap.TranslateStat(&st)
+		rn.rootIno = st.Ino
 	}
 	if len(args.Exclude) > 0 || len(args.ExcludeWildcard) > 0 || len(args.ExcludeFrom) > 0 {
 		rn.excluder = prepareExcluder(args)
@@ -148,4 +161,24 @@ func (rn *RootNode) excludeDirEntries(d *dirfdPlus, entries []fuse.DirEntry) (fi
 		filtered = append(filtered, entry)
 	}
 	return filtered
+}
+
+// uniqueStableAttr returns a fs.StableAttr struct with a unique generation number,
+// preventing files to appear hard-linked, even when they have the same inode number.
+//
+// This is good because inode numbers can be reused behind our back, which could make
+// unrelated files appear hard-linked.
+// Example: https://github.com/rfjakob/gocryptfs/issues/802
+func (rn *RootNode) uniqueStableAttr(mode uint32, ino uint64) fs.StableAttr {
+	return fs.StableAttr{
+		Mode: mode,
+		Ino:  ino,
+		// Make each directory entry a unique node by using a unique generation
+		// value. Also see the comment at RootNode.gen for details.
+		Gen: atomic.AddUint64(&rn.gen, 1),
+	}
+}
+
+func (rn *RootNode) RootIno() uint64 {
+	return rn.rootIno
 }

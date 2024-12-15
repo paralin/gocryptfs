@@ -2,6 +2,9 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -97,29 +100,54 @@ func TestInitReverse(t *testing.T) {
 	}
 }
 
+// Test -init with -masterkey
+func TestInitMasterkey(t *testing.T) {
+	var testMk = make([]byte, 32)
+	dir := test_helpers.InitFS(t, fmt.Sprintf("-masterkey=%s", hex.EncodeToString(testMk)))
+	m, _, err := configfile.LoadAndDecrypt(dir+"/"+configfile.ConfDefaultName, testPw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(testMk, m) {
+		t.Error("masterkey does not match")
+	}
+}
+
 // testPasswd changes the password from "test" to "test" using
 // the -extpass method, then from "test" to "newpasswd" using the
 // stdin method.
 func testPasswd(t *testing.T, dir string, extraArgs ...string) {
-	// Change password using "-extpass"
+	// Change password #1: old passwd via "-extpass", new one via stdin
 	args := []string{"-q", "-passwd", "-extpass", "echo test"}
 	args = append(args, extraArgs...)
 	args = append(args, dir)
 	cmd := exec.Command(test_helpers.GocryptfsBinary, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	err := cmd.Run()
+	p, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cmd.Start()
 	if err != nil {
 		t.Error(err)
 	}
-	// Change password using stdin
+	// New password through stdin
+	p.Write([]byte("test\n"))
+	p.Close()
+	err = cmd.Wait()
+	if err != nil {
+		t.Error(err)
+	}
+
+	// Change password #2: using stdin
 	args = []string{"-q", "-passwd"}
 	args = append(args, extraArgs...)
 	args = append(args, dir)
 	cmd = exec.Command(test_helpers.GocryptfsBinary, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	p, err := cmd.StdinPipe()
+	p, err = cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,10 +348,22 @@ func TestInitConfig(t *testing.T) {
 		"-config", config, dir)
 	cmd2.Stdout = os.Stdout
 	cmd2.Stderr = os.Stderr
-	err = cmd2.Run()
+	p, err := cmd2.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = cmd2.Start()
 	if err != nil {
 		t.Error(err)
 	}
+	// New password
+	p.Write([]byte("passwd\n"))
+	p.Close()
+	err = cmd2.Wait()
+	if err != nil {
+		t.Error(err)
+	}
+
 }
 
 // Test -ro
@@ -407,7 +447,7 @@ func TestMountPasswordIncorrect(t *testing.T) {
 	err := test_helpers.Mount(cDir, pDir, false, "-extpass", "echo WRONG", "-wpanic=false", "-ctlsock", ctlSock)
 	exitCode := test_helpers.ExtractCmdExitCode(err)
 	if exitCode != exitcodes.PasswordIncorrect {
-		t.Errorf("want=%d, got=%d", exitcodes.PasswordIncorrect, exitCode)
+		t.Errorf("wrong exit code: want=%d, have=%d", exitcodes.PasswordIncorrect, exitCode)
 	}
 	if _, err := os.Stat(ctlSock); err == nil {
 		t.Errorf("socket file %q left behind", ctlSock)
@@ -1017,4 +1057,40 @@ func TestMountCreat(t *testing.T) {
 		wg.Wait()
 		test_helpers.UnmountPanic(mnt)
 	}
+}
+
+// https://github.com/rfjakob/gocryptfs/issues/776
+func TestOrphanedSocket(t *testing.T) {
+	cDir := test_helpers.InitFS(t)
+	ctlSock := cDir + ".sock"
+	mnt := cDir + ".mnt"
+	test_helpers.MountOrFatal(t, cDir, mnt, "-extpass", "echo test", "-wpanic=false", "-ctlsock", ctlSock)
+
+	mnt2 := cDir + ".mnt2"
+	err := test_helpers.Mount(cDir, mnt2, false, "-extpass", "echo test", "-wpanic=false", "-ctlsock", ctlSock)
+	exitCode := test_helpers.ExtractCmdExitCode(err)
+	if exitCode != exitcodes.CtlSock {
+		t.Errorf("wrong exit code: want=%d, have=%d", exitcodes.CtlSock, exitCode)
+	}
+	test_helpers.UnmountPanic(mnt)
+
+	// Unmount returns before the gocryptfs process has terminated and before the
+	// socket file has been deleted. Wait out the deletion.
+	for i := 0; i < 100; i++ {
+		_, err := os.Stat(ctlSock)
+		if errors.Is(err, os.ErrNotExist) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Create orphaned socket file
+	err = syscall.Mknod(ctlSock, syscall.S_IFSOCK|0666, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Should delete the socket file automatically and the mount should work
+	test_helpers.MountOrFatal(t, cDir, mnt, "-extpass", "echo test", "-wpanic=false", "-ctlsock", ctlSock)
+	test_helpers.UnmountPanic(mnt)
 }
